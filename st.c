@@ -1631,9 +1631,7 @@ tsetmode(int priv, int set, int *args, int narg)
 				      codes. */
 				break;
 			default:
-				fprintf(stderr,
-					"erresc: unknown private set/reset mode %d\n",
-					*args);
+				/* silently ignore unknown private modes (e.g. 2026) */
 				break;
 			}
 		} else {
@@ -1653,9 +1651,7 @@ tsetmode(int priv, int set, int *args, int narg)
 				MODBIT(term.mode, set, MODE_CRLF);
 				break;
 			default:
-				fprintf(stderr,
-					"erresc: unknown set/reset mode %d\n",
-					*args);
+				/* silently ignore unknown set/reset modes */
 				break;
 			}
 		}
@@ -1671,8 +1667,10 @@ csihandle(void)
 	switch (csiescseq.mode[0]) {
 	default:
 	unknown:
-		fprintf(stderr, "erresc: unknown csi ");
-		csidump();
+		/* pi/tmux send many unsupported capability-queries (kitty,
+		 * synchronized-update, ...); silently ignore instead of
+		 * spamming stderr with "erresc: unknown csi ..." */
+		break;
 		/* die(""); */
 		break;
 	case '@': /* ICH -- Insert <n> blank char */
