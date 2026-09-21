@@ -35,6 +35,7 @@
 #define ESC_ARG_SIZ   16
 #define STR_BUF_SIZ   ESC_BUF_SIZ
 #define STR_ARG_SIZ   ESC_ARG_SIZ
+#define HISTSIZE      2000
 
 /* macros */
 #define IS_SET(flag)		((term.mode & (flag)) != 0)
@@ -42,6 +43,12 @@
 #define ISCONTROLC1(c)		(BETWEEN(c, 0x80, 0x9f))
 #define ISCONTROL(c)		(ISCONTROLC0(c) || ISCONTROLC1(c))
 #define ISDELIM(u)		(u && wcschr(worddelimiters, u))
+#define TLINE(y)		((y) < term.scr ? term.hist[((y) + term.histi - \
+				term.scr + HISTSIZE + 1) % HISTSIZE] : \
+				term.line[(y) - term.scr])
+
+// from @LukeSmithxyz
+#define TLINE_HIST(y)           ((y) <= HISTSIZE-term.row+2 ? term.hist[(y)] : term.line[(y-HISTSIZE+term.row-3)])
 
 enum term_mode {
 	MODE_WRAP        = 1 << 0,
@@ -115,6 +122,9 @@ typedef struct {
 	int col;      /* nb col */
 	Line *line;   /* screen */
 	Line *alt;    /* alternate screen */
+	Line hist[HISTSIZE]; /* history buffer */
+	int histi;    /* history index */
+	int scr;      /* scroll back */
 	int *dirty;   /* dirtyness of lines */
 	TCursor c;    /* cursor */
 	int ocx;      /* old cursor col */
@@ -185,8 +195,8 @@ static void tnewline(int);
 static void tputtab(int);
 static void tputc(Rune);
 static void treset(void);
-static void tscrollup(int, int);
-static void tscrolldown(int, int);
+static void tscrollup(int, int, int);
+static void tscrolldown(int, int, int);
 static void tsetattr(const int *, int);
 static void tsetchar(Rune, const Glyph *, int, int);
 static void tsetdirt(int, int);
@@ -201,6 +211,7 @@ static void tdefutf8(char);
 static int32_t tdefcolor(const int *, int *, int);
 static void tdeftran(char);
 static void tstrsequence(uchar);
+static const char *findlastany(const char *, const char**, size_t);
 
 static void drawregion(int, int, int, int);
 
@@ -409,10 +420,10 @@ tlinelen(int y)
 {
 	int i = term.col;
 
-	if (term.line[y][i - 1].mode & ATTR_WRAP)
+	if (TLINE(y)[i - 1].mode & ATTR_WRAP)
 		return i;
 
-	while (i > 0 && term.line[y][i - 1].u == ' ')
+	while (i > 0 && TLINE(y)[i - 1].u == ' ')
 		--i;
 
 	return i;
@@ -521,7 +532,7 @@ selsnap(int *x, int *y, int direction)
 		 * Snap around if the word wraps around at the end or
 		 * beginning of a line.
 		 */
-		prevgp = &term.line[*y][*x];
+		prevgp = &TLINE(*y)[*x];
 		prevdelim = ISDELIM(prevgp->u);
 		for (;;) {
 			newx = *x + direction;
@@ -536,14 +547,14 @@ selsnap(int *x, int *y, int direction)
 					yt = *y, xt = *x;
 				else
 					yt = newy, xt = newx;
-				if (!(term.line[yt][xt].mode & ATTR_WRAP))
+				if (!(TLINE(yt)[xt].mode & ATTR_WRAP))
 					break;
 			}
 
 			if (newx >= tlinelen(newy))
 				break;
 
-			gp = &term.line[newy][newx];
+			gp = &TLINE(newy)[newx];
 			delim = ISDELIM(gp->u);
 			if (!(gp->mode & ATTR_WDUMMY) && (delim != prevdelim
 					|| (delim && gp->u != prevgp->u)))
@@ -564,14 +575,14 @@ selsnap(int *x, int *y, int direction)
 		*x = (direction < 0) ? 0 : term.col - 1;
 		if (direction < 0) {
 			for (; *y > 0; *y += direction) {
-				if (!(term.line[*y-1][term.col-1].mode
+				if (!(TLINE(*y-1)[term.col-1].mode
 						& ATTR_WRAP)) {
 					break;
 				}
 			}
 		} else if (direction > 0) {
 			for (; *y < term.row-1; *y += direction) {
-				if (!(term.line[*y][term.col-1].mode
+				if (!(TLINE(*y)[term.col-1].mode
 						& ATTR_WRAP)) {
 					break;
 				}
@@ -602,13 +613,13 @@ getsel(void)
 		}
 
 		if (sel.type == SEL_RECTANGULAR) {
-			gp = &term.line[y][sel.nb.x];
+			gp = &TLINE(y)[sel.nb.x];
 			lastx = sel.ne.x;
 		} else {
-			gp = &term.line[y][sel.nb.y == y ? sel.nb.x : 0];
+			gp = &TLINE(y)[sel.nb.y == y ? sel.nb.x : 0];
 			lastx = (sel.ne.y == y) ? sel.ne.x : term.col-1;
 		}
-		last = &term.line[y][MIN(lastx, linelen-1)];
+		last = &TLINE(y)[MIN(lastx, linelen-1)];
 		while (last >= gp && last->u == ' ')
 			--last;
 
@@ -844,6 +855,9 @@ void
 ttywrite(const char *s, size_t n, int may_echo)
 {
 	const char *next;
+	Arg arg = (Arg) { .i = term.scr };
+
+	kscrolldown(&arg);
 
 	if (may_echo && IS_SET(MODE_ECHO))
 		twrite(s, n, 1);
@@ -952,7 +966,7 @@ tattrset(int attr)
 
 	for (i = 0; i < term.row-1; i++) {
 		for (j = 0; j < term.col-1; j++) {
-			if (term.line[i][j].mode & attr)
+			if (TLINE(i)[j].mode & attr)
 				return 1;
 		}
 	}
@@ -979,7 +993,7 @@ tsetdirtattr(int attr)
 
 	for (i = 0; i < term.row-1; i++) {
 		for (j = 0; j < term.col-1; j++) {
-			if (term.line[i][j].mode & attr) {
+			if (TLINE(i)[j].mode & attr) {
 				tsetdirt(i, i);
 				break;
 			}
@@ -1055,12 +1069,19 @@ tswapscreen(void)
 }
 
 void
-tscrolldown(int orig, int n)
+tscrolldown(int orig, int n, int copyhist)
 {
 	int i;
 	Line temp;
 
 	LIMIT(n, 0, term.bot-orig+1);
+
+	if (copyhist) {
+		term.histi = (term.histi - 1 + HISTSIZE) % HISTSIZE;
+		temp = term.hist[term.histi];
+		term.hist[term.histi] = term.line[term.bot];
+		term.line[term.bot] = temp;
+	}
 
 	tsetdirt(orig, term.bot-n);
 	tclearregion(0, term.bot-n+1, term.col-1, term.bot);
@@ -1075,12 +1096,55 @@ tscrolldown(int orig, int n)
 }
 
 void
-tscrollup(int orig, int n)
+kscrolldown(const Arg* a)
+{
+	int n = a->i;
+
+	if (n < 0)
+		n = term.row + n;
+
+	if (n > term.scr)
+		n = term.scr;
+
+	if (term.scr > 0) {
+		term.scr -= n;
+		selscroll(0, -n);
+		tfulldirt();
+	}
+}
+
+void
+kscrollup(const Arg* a)
+{
+	int n = a->i;
+
+	if (n < 0)
+		n = term.row + n;
+
+	if (term.scr <= HISTSIZE-n) {
+		term.scr += n;
+		selscroll(0, n);
+		tfulldirt();
+	}
+}
+
+void
+tscrollup(int orig, int n, int copyhist)
 {
 	int i;
 	Line temp;
 
 	LIMIT(n, 0, term.bot-orig+1);
+
+	if (copyhist) {
+		term.histi = (term.histi + 1) % HISTSIZE;
+		temp = term.hist[term.histi];
+		term.hist[term.histi] = term.line[orig];
+		term.line[orig] = temp;
+	}
+
+	if (term.scr > 0 && term.scr < HISTSIZE)
+		term.scr = MIN(term.scr + n, HISTSIZE-1);
 
 	tclearregion(0, orig, term.col-1, orig+n-1);
 	tsetdirt(orig+n, term.bot);
@@ -1120,7 +1184,7 @@ tnewline(int first_col)
 	int y = term.c.y;
 
 	if (y == term.bot) {
-		tscrollup(term.top, 1);
+		tscrollup(term.top, 1, 1);
 	} else {
 		y++;
 	}
@@ -1288,14 +1352,14 @@ void
 tinsertblankline(int n)
 {
 	if (BETWEEN(term.c.y, term.top, term.bot))
-		tscrolldown(term.c.y, n);
+		tscrolldown(term.c.y, n, 0);
 }
 
 void
 tdeleteline(int n)
 {
 	if (BETWEEN(term.c.y, term.top, term.bot))
-		tscrollup(term.c.y, n);
+		tscrollup(term.c.y, n, 0);
 }
 
 int32_t
@@ -1307,9 +1371,6 @@ tdefcolor(const int *attr, int *npar, int l)
 	switch (attr[*npar + 1]) {
 	case 2: /* direct color in RGB space */
 		if (*npar + 4 >= l) {
-			fprintf(stderr,
-				"erresc(38): Incorrect number of parameters (%d)\n",
-				*npar);
 			break;
 		}
 		r = attr[*npar + 2];
@@ -1317,21 +1378,17 @@ tdefcolor(const int *attr, int *npar, int l)
 		b = attr[*npar + 4];
 		*npar += 4;
 		if (!BETWEEN(r, 0, 255) || !BETWEEN(g, 0, 255) || !BETWEEN(b, 0, 255))
-			fprintf(stderr, "erresc: bad rgb color (%u,%u,%u)\n",
-				r, g, b);
+			; /* erresc: bad rgb color (silenced) */
 		else
 			idx = TRUECOLOR(r, g, b);
 		break;
 	case 5: /* indexed color */
 		if (*npar + 2 >= l) {
-			fprintf(stderr,
-				"erresc(38): Incorrect number of parameters (%d)\n",
-				*npar);
 			break;
 		}
 		*npar += 2;
 		if (!BETWEEN(attr[*npar], 0, 255))
-			fprintf(stderr, "erresc: bad fgcolor %d\n", attr[*npar]);
+			; /* erresc: bad fgcolor (silenced) */
 		else
 			idx = attr[*npar];
 		break;
@@ -1340,8 +1397,7 @@ tdefcolor(const int *attr, int *npar, int l)
 	case 3: /* direct color in CMY space */
 	case 4: /* direct color in CMYK space */
 	default:
-		fprintf(stderr,
-		        "erresc(38): gfx attr %d unknown\n", attr[*npar]);
+		/* erresc(38): gfx attr unknown (silenced) */
 		break;
 	}
 
@@ -1446,10 +1502,7 @@ tsetattr(const int *attr, int l)
 			} else if (BETWEEN(attr[i], 100, 107)) {
 				term.c.attr.bg = attr[i] - 100 + 8;
 			} else {
-				fprintf(stderr,
-					"erresc(default): gfx attr %d unknown\n",
-					attr[i]);
-				csidump();
+				/* erresc(default): gfx attr unknown (silenced) */
 			}
 			break;
 		}
@@ -1571,9 +1624,7 @@ tsetmode(int priv, int set, const int *args, int narg)
 				      codes. */
 				break;
 			default:
-				fprintf(stderr,
-					"erresc: unknown private set/reset mode %d\n",
-					*args);
+				/* erresc: unknown private mode (silenced) */
 				break;
 			}
 		} else {
@@ -1593,9 +1644,7 @@ tsetmode(int priv, int set, const int *args, int narg)
 				MODBIT(term.mode, set, MODE_CRLF);
 				break;
 			default:
-				fprintf(stderr,
-					"erresc: unknown set/reset mode %d\n",
-					*args);
+				/* erresc: unknown mode (silenced) */
 				break;
 			}
 		}
@@ -1611,8 +1660,7 @@ csihandle(void)
 	switch (csiescseq.mode[0]) {
 	default:
 	unknown:
-		fprintf(stderr, "erresc: unknown csi ");
-		csidump();
+		/* erresc: unknown csi (silenced) */
 		/* die(""); */
 		break;
 	case '@': /* ICH -- Insert <n> blank char */
@@ -1739,11 +1787,11 @@ csihandle(void)
 	case 'S': /* SU -- Scroll <n> line up */
 		if (csiescseq.priv) break;
 		DEFAULT(csiescseq.arg[0], 1);
-		tscrollup(term.top, csiescseq.arg[0]);
+		tscrollup(term.top, csiescseq.arg[0], 0);
 		break;
 	case 'T': /* SD -- Scroll <n> line down */
 		DEFAULT(csiescseq.arg[0], 1);
-		tscrolldown(term.top, csiescseq.arg[0]);
+		tscrolldown(term.top, csiescseq.arg[0], 0);
 		break;
 	case 'L': /* IL -- Insert <n> blank lines */
 		DEFAULT(csiescseq.arg[0], 1);
@@ -1864,9 +1912,7 @@ osc_color_response(int num, int index, int is_osc4)
 	unsigned char r, g, b;
 
 	if (xgetcolor(is_osc4 ? num : index, &r, &g, &b)) {
-		fprintf(stderr, "erresc: failed to fetch %s color %d\n",
-		        is_osc4 ? "osc4" : "osc",
-		        is_osc4 ? num : index);
+		/* erresc: failed to fetch color (silenced) */
 		return;
 	}
 
@@ -1920,7 +1966,7 @@ strhandle(void)
 					xsetsel(dec);
 					xclipcopy();
 				} else {
-					fprintf(stderr, "erresc: invalid base64\n");
+					/* erresc: invalid base64 (silenced) */
 				}
 			}
 			return;
@@ -1936,8 +1982,7 @@ strhandle(void)
 			if (!strcmp(p, "?")) {
 				osc_color_response(par, osc_table[j].idx, 0);
 			} else if (xsetcolorname(osc_table[j].idx, p)) {
-				fprintf(stderr, "erresc: invalid %s color: %s\n",
-				        osc_table[j].str, p);
+				/* erresc: invalid color (silenced) */
 			} else {
 				tfulldirt();
 			}
@@ -1957,8 +2002,7 @@ strhandle(void)
 					xloadcols();
 					return; /* color reset without parameter */
 				}
-				fprintf(stderr, "erresc: invalid color j=%d, p=%s\n",
-				        j, p ? p : "(null)");
+				/* erresc: invalid color (silenced) */
 			} else {
 				/*
 				 * TODO if defaultbg color is changed, borders
@@ -1975,7 +2019,7 @@ strhandle(void)
 			if ((j = par - 110) < 0 || j >= LEN(osc_table))
 				break; /* shouldn't be possible */
 			if (xsetcolorname(osc_table[j].idx, NULL)) {
-				fprintf(stderr, "erresc: %s color not found\n", osc_table[j].str);
+				/* erresc: color not found (silenced) */
 			} else {
 				tfulldirt();
 			}
@@ -1991,8 +2035,7 @@ strhandle(void)
 		return;
 	}
 
-	fprintf(stderr, "erresc: unknown str ");
-	strdump();
+	/* erresc: unknown str (silenced) */
 }
 
 void
@@ -2058,6 +2101,78 @@ sendbreak(const Arg *arg)
 {
 	if (tcsendbreak(cmdfd, 0))
 		perror("Error sending break");
+}
+
+// from @LukeSmithxyz
+int
+tlinehistlen(int y)
+{
+	int i = term.col;
+
+	if (TLINE_HIST(y)[i - 1].mode & ATTR_WRAP)
+		return i;
+
+	while (i > 0 && TLINE_HIST(y)[i - 1].u == ' ')
+		--i;
+
+	return i;
+}
+
+// from @LukeSmithxyz
+void
+externalpipe(const Arg *arg)
+{
+	int to[2];
+	char buf[UTF_SIZ];
+	void (*oldsigpipe)(int);
+	Glyph *bp, *end;
+	int lastpos, n, newline;
+
+	if (pipe(to) == -1)
+		return;
+
+	switch (fork()) {
+	case -1:
+		close(to[0]);
+		close(to[1]);
+		return;
+	case 0:
+		dup2(to[0], STDIN_FILENO);
+		close(to[0]);
+		close(to[1]);
+		execvp(((char **)arg->v)[0], (char **)arg->v);
+		fprintf(stderr, "st: execvp %s\n", ((char **)arg->v)[0]);
+		perror("failed");
+		exit(0);
+	}
+
+	close(to[0]);
+	/* ignore sigpipe for now, in case child exists early */
+	oldsigpipe = signal(SIGPIPE, SIG_IGN);
+	newline = 0;
+	/* modify externalpipe patch to pipe history too      */
+	for (n = 0; n <= HISTSIZE + 2; n++) {
+		bp = TLINE_HIST(n);
+		lastpos = MIN(tlinehistlen(n) +1, term.col) - 1;
+		if (lastpos < 0)
+			break;
+		if (lastpos == 0)
+			continue;
+		end = &bp[lastpos + 1];
+		for (; bp < end; ++bp)
+			if (xwrite(to[1], buf, utf8encode(bp->u, buf)) < 0)
+				break;
+		if ((newline = TLINE_HIST(n)[lastpos].mode & ATTR_WRAP))
+			continue;
+		if (xwrite(to[1], "\n", 1) < 0)
+			break;
+		newline = 0;
+	}
+	if (newline)
+		(void)xwrite(to[1], "\n", 1);
+	close(to[1]);
+	/* restore */
+	signal(SIGPIPE, oldsigpipe);
 }
 
 void
@@ -2157,7 +2272,7 @@ tdeftran(char ascii)
 	char *p;
 
 	if ((p = strchr(cs, ascii)) == NULL) {
-		fprintf(stderr, "esc unhandled charset: ESC ( %c\n", ascii);
+		/* esc unhandled charset (silenced) */
 	} else {
 		term.trantbl[term.icharset] = vcs[p - cs];
 	}
@@ -2332,7 +2447,7 @@ eschandle(uchar ascii)
 		return 0;
 	case 'D': /* IND -- Linefeed */
 		if (term.c.y == term.bot) {
-			tscrollup(term.top, 1);
+			tscrollup(term.top, 1, 1);
 		} else {
 			tmoveto(term.c.x, term.c.y+1);
 		}
@@ -2345,7 +2460,7 @@ eschandle(uchar ascii)
 		break;
 	case 'M': /* RI -- Reverse index */
 		if (term.c.y == term.top) {
-			tscrolldown(term.top, 1);
+			tscrolldown(term.top, 1, 1);
 		} else {
 			tmoveto(term.c.x, term.c.y-1);
 		}
@@ -2376,8 +2491,7 @@ eschandle(uchar ascii)
 			strhandle();
 		break;
 	default:
-		fprintf(stderr, "erresc: unknown sequence ESC 0x%02X '%c'\n",
-			(uchar) ascii, isprint(ascii)? ascii:'.');
+		/* erresc: unknown sequence (silenced) */
 		break;
 	}
 	return 1;
@@ -2568,7 +2682,7 @@ twrite(const char *buf, int buflen, int show_ctrl)
 void
 tresize(int col, int row)
 {
-	int i;
+	int i, j;
 	int minrow = MIN(row, term.row);
 	int mincol = MIN(col, term.col);
 	int *bp;
@@ -2604,6 +2718,14 @@ tresize(int col, int row)
 	term.alt  = xrealloc(term.alt,  row * sizeof(Line));
 	term.dirty = xrealloc(term.dirty, row * sizeof(*term.dirty));
 	term.tabs = xrealloc(term.tabs, col * sizeof(*term.tabs));
+
+	for (i = 0; i < HISTSIZE; i++) {
+		term.hist[i] = xrealloc(term.hist[i], col * sizeof(Glyph));
+		for (j = mincol; j < col; j++) {
+			term.hist[i][j] = term.c.attr;
+			term.hist[i][j].u = ' ';
+		}
+	}
 
 	/* resize each row to new width, zero-pad if needed */
 	for (i = 0; i < minrow; i++) {
@@ -2663,7 +2785,7 @@ drawregion(int x1, int y1, int x2, int y2)
 			continue;
 
 		term.dirty[y] = 0;
-		xdrawline(term.line[y], x1, y, x2);
+		xdrawline(TLINE(y), x1, y, x2);
 	}
 }
 
@@ -2684,8 +2806,10 @@ draw(void)
 		cx--;
 
 	drawregion(0, 0, term.col, term.row);
-	xdrawcursor(cx, term.c.y, term.line[term.c.y][cx],
-			term.ocx, term.ocy, term.line[term.ocy][term.ocx]);
+	if (term.scr == 0)
+		xdrawcursor(cx, term.c.y, term.line[term.c.y][cx],
+				term.ocx, term.ocy, term.line[term.ocy][term.ocx],
+				term.line[term.ocy], term.col);
 	term.ocx = cx;
 	term.ocy = term.c.y;
 	xfinishdraw();
@@ -2698,4 +2822,85 @@ redraw(void)
 {
 	tfulldirt();
 	draw();
+}
+
+const char *
+findlastany(const char *str, const char**find, size_t len)
+{
+	const char *found = NULL;
+	int i = 0;
+
+	for (found = str + strlen(str) - 1; found >= str; --found) {
+		for(i = 0; i < len; i++) {
+			if (strncmp(found, find[i], strlen(find[i])) == 0) {
+				return found;
+			}
+		}
+	}
+
+	return NULL;
+}
+
+/*
+** Select and copy the previous url on screen (do nothing if there's no url).
+**
+** FIXME: doesn't handle urls that span multiple lines; will need to add support
+**        for multiline "getsel()" first
+*/
+void
+copyurl(const Arg *arg) {
+	/* () and [] can appear in urls, but excluding them here will reduce false
+	 * positives when figuring out where a given url ends.
+	 */
+	static const char URLCHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		"abcdefghijklmnopqrstuvwxyz"
+		"0123456789-._~:/?#@!$&'*+,;=%";
+
+	static const char* URLSTRINGS[] = {"http://", "https://"};
+
+	int row = 0, /* row of current URL */
+		col = 0, /* column of current URL start */
+		colend = 0, /* column of last occurrence */
+		passes = 0; /* how many rows have been scanned */
+
+	char linestr[term.col + 1];
+	const char *c = NULL,
+		 *match = NULL;
+
+	row = (sel.ob.x >= 0 && sel.nb.y > 0) ? sel.nb.y : term.bot;
+	LIMIT(row, term.top, term.bot);
+
+	colend = (sel.ob.x >= 0 && sel.nb.y > 0) ? sel.nb.x : term.col;
+	LIMIT(colend, 0, term.col);
+
+	/*
+	** Scan from (term.row - 1,term.col - 1) to (0,0) and find
+	** next occurrance of a URL
+	*/
+	for (passes = 0; passes < term.row; passes++) {
+		/* Read in each column of every row until
+		** we hit previous occurrence of URL
+		*/
+		for (col = 0; col < colend; ++col)
+			linestr[col] = term.line[row][col].u < 128 ? term.line[row][col].u : ' ';
+		linestr[col] = '\0';
+
+		if ((match = findlastany(linestr, URLSTRINGS,
+						sizeof(URLSTRINGS)/sizeof(URLSTRINGS[0]))))
+			break;
+
+		if (--row < 0)
+			row = term.row - 1;
+
+		colend = term.col;
+	};
+
+	if (match) {
+		size_t l = strspn(match, URLCHARS);
+		selstart(match - linestr, row, 0);
+		selextend(match - linestr + l - 1, row, SEL_REGULAR, 0);
+		selextend(match - linestr + l - 1, row, SEL_REGULAR, 1);
+		xsetsel(getsel());
+		xclipcopy();
+	}
 }
