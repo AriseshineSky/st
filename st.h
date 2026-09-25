@@ -83,13 +83,10 @@ void die(const char *, ...);
 void redraw(void);
 void draw(void);
 
-void kscrolldown(const Arg *);
-void kscrollup(const Arg *);
 void printscreen(const Arg *);
 void printsel(const Arg *);
 void sendbreak(const Arg *);
 void toggleprinter(const Arg *);
-void copyurl(const Arg *);
 
 int tattrset(int);
 void tnew(int, int);
@@ -115,9 +112,6 @@ size_t utf8encode(Rune, char *);
 void *xmalloc(size_t);
 void *xrealloc(void *, size_t);
 char *xstrdup(const char *);
-
-// from @LukeSmithxyz
-void externalpipe(const Arg *);
 
 /* config.h globals */
 extern char *utmp;
