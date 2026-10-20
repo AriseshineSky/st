@@ -1589,6 +1589,12 @@ tsetmode(int priv, int set, const int *args, int narg)
 			case 2004: /* 2004: bracketed paste mode */
 				xsetmode(set, MODE_BRCKTPASTE);
 				break;
+			case 2026: /* 2026: synchronized output (BSU/ESU) */
+				if (set)
+					tsync_begin();
+				else
+					tsync_end();
+				break;
 			/* Not implemented mouse modes. See comments there. */
 			case 1001: /* mouse highlight mode; can hang the
 				      terminal by design when implemented. */
